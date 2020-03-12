@@ -566,28 +566,17 @@ static void cmd_dump(BaseSequentialStream *chp, int argc, char *argv[])
 
 static void cmd_capture(BaseSequentialStream *chp, int argc, char *argv[])
 {
-// read pixel count at one time (PART*2 bytes required for read buffer)
-#define PART 960
-    
     chMtxLock(&mutex_ili9341); // [capture display + spi_buffer]
-    // use uint16_t spi_buffer[1024] (defined in ili9341) for read buffer
-    uint16_t *buf = &spi_buffer[0];
-    int len = 320 * 240;
-    int i;
-    ili9341_read_memory(0, 0, 320, 240, PART, buf);
-    for (i = 0; i < PART; i++) {
-        streamPut(chp, buf[i] >> 8);
-        streamPut(chp, buf[i] & 0xff);
-    }
+    // read 2 row pixel time (read buffer limit by 2/3 + 1 from spi_buffer size)
 
-    len -= PART;
-    while (len > 0) {
-        ili9341_read_memory_continue(PART, buf);
-        for (i = 0; i < PART; i++) {
-            streamPut(chp, buf[i] >> 8);
-            streamPut(chp, buf[i] & 0xff);
+    for (int y=0; y < 240; y+=2)
+    {
+    	// use uint16_t spi_buffer[1024] (defined in ili9341) for read buffer
+    	uint8_t *buf = (uint8_t *)spi_buffer;
+        ili9341_read_memory(0, y, 320, 2, 2*320, spi_buffer);
+        for (int i = 0; i < 4*320; i++) {
+        	streamPut(chp, *buf++);
         }
-        len -= PART;
     }
     chMtxUnlock(&mutex_ili9341); // [/capture display + spi_buffer]
 }
@@ -642,10 +631,10 @@ config_t config = {
 #ifdef __DAC__
   .dac_value =         1922,
 #endif
-  .grid_color =        0x1084,
-  .menu_normal_color = 0xffff,
-  .menu_active_color = 0x7777,
-  .trace_color =       { RGBHEX(0xffe31f), RGBHEX(0x00bfe7), RGBHEX(0x1fe300), RGBHEX(0xe7079f) },
+  .grid_color =        DEFAULT_GRID_COLOR,
+  .menu_normal_color = DEFAULT_MENU_COLOR,
+  .menu_active_color = DEFAULT_MENU_ACTIVE_COLOR,
+  .trace_color =       { DEFAULT_TRACE_1_COLOR, DEFAULT_TRACE_2_COLOR, DEFAULT_TRACE_3_COLOR, DEFAULT_TRACE_4_COLOR },
   .touch_cal =         { 370, 540, 154, 191 },  //{ 620, 600, 160, 190 },
   .default_loadcal =   0,
   .harmonic_freq_threshold = 300000000,
@@ -664,10 +653,10 @@ properties_t current_props = {
   ._electrical_delay =  0,
   ._trace = /*[4] */
   {/*enable, type, channel, polar, scale, refpos*/
-    { 1, TRC_LOGMAG, 0, 0, 1.0, 7.0 },
-    { 1, TRC_LOGMAG, 1, 0, 1.0, 7.0 },
+    { 1, TRC_LOGMAG, 0, 0, 1.0, 9.0 },
+    { 1, TRC_LOGMAG, 1, 0, 1.0, 9.0 },
     { 1, TRC_SMITH,  0, 1, 1.0, 0.0 },
-    { 1, TRC_PHASE,  1, 0, 1.0, 4.0 }
+    { 1, TRC_PHASE,  1, 0, 1.0, 5.0 }
   },
   ._markers = /*[4] */ {
     { 1, 30, 0 }, { 0, 40, 0 }, { 0, 60, 0 }, { 0, 80, 0 }
@@ -886,7 +875,7 @@ static void update_marker_index(void)
 static void set_frequencies(uint32_t start, uint32_t stop, int16_t points)
 {
   chMtxLock(&mutex_sweep);
-  uint32_t i;
+  uint16_t i;
   uint32_t span = stop - start;
   for (i = 0; i < points; i++) {
     uint32_t offset = (uint32_t)((i * (uint64_t)span) / (points - 1));
@@ -1551,17 +1540,17 @@ static const struct {
   uint16_t refpos;
   float scale_unit;
 } trace_info[] = {
-  { "LOGMAG", 7, 10 },
-  { "PHASE",  4, 90 },
-  { "DELAY",  4,  1e-9 },
+  { "LOGMAG", 9, 10 },
+  { "PHASE",  5, 90 },
+  { "DELAY",  5,  1e-9 },
   { "SMITH",  0,  1 },
   { "POLAR",  0,  1 },
   { "LINEAR", 0,  0.125 },
   { "SWR",    0,  1 },
-  { "REAL",   4,  0.25 },
-  { "IMAG",   4,  0.25 },
+  { "REAL",   5,  0.25 },
+  { "IMAG",   5,  0.25 },
   { "R",      0, 100 },
-  { "X",      4, 100 }
+  { "X",      5, 100 }
 };
 
 static const char * const trc_channel_name[] = {
@@ -1641,7 +1630,7 @@ double my_atof(const char *p)
     neg = TRUE;
   if (*p == '-' || *p == '+')
     p++;
-    double x = atoi(p);
+  double x = atoi(p);
   while (isdigit((int)*p))
     p++;
   if (*p == '.') {
@@ -1669,6 +1658,11 @@ double my_atof(const char *p)
     x = -x;
   return x;
 }
+
+typedef struct {
+	  char *tracename;
+	  uint8_t type;
+} type_list;
 
 static void cmd_trace(BaseSequentialStream *chp, int argc, char *argv[])
 {
@@ -1704,34 +1698,29 @@ static void cmd_trace(BaseSequentialStream *chp, int argc, char *argv[])
     chprintf(chp, "%d %s %s\r\n", t, type, channel);
     return;
   }
+
   if (argc > 1) {
-    if (strcmp(argv[1], "logmag") == 0) {
-      set_trace_type(t, TRC_LOGMAG);
-    } else if (strcmp(argv[1], "phase") == 0) {
-      set_trace_type(t, TRC_PHASE);
-    } else if (strcmp(argv[1], "polar") == 0) {
-      set_trace_type(t, TRC_POLAR);
-    } else if (strcmp(argv[1], "smith") == 0) {
-      set_trace_type(t, TRC_SMITH);
-    } else if (strcmp(argv[1], "delay") == 0) {
-      set_trace_type(t, TRC_DELAY);
-    } else if (strcmp(argv[1], "linear") == 0) {
-      set_trace_type(t, TRC_LINEAR);
-    } else if (strcmp(argv[1], "swr") == 0) {
-      set_trace_type(t, TRC_SWR);
-    } else if (strcmp(argv[1], "real") == 0) {
-      set_trace_type(t, TRC_REAL);
-    } else if (strcmp(argv[1], "imag") == 0) {
-      set_trace_type(t, TRC_IMAG);
-    } else if (strcmp(argv[1], "r") == 0) {
-      set_trace_type(t, TRC_R);
-    } else if (strcmp(argv[1], "x") == 0) {
-      set_trace_type(t, TRC_X);
-    } else if (strcmp(argv[1], "linear") == 0) {
-      set_trace_type(t, TRC_LINEAR);
-    } else if (strcmp(argv[1], "off") == 0) {
-      set_trace_type(t, TRC_OFF);
-    } else if (strcmp(argv[1], "scale") == 0 && argc >= 3) {
+	  static const type_list t_list[] = {
+	  	{"logmag", TRC_LOGMAG},
+	  	{"phase", TRC_PHASE},
+	  	{"polar", TRC_POLAR},
+	  	{"smith", TRC_SMITH},
+	  	{"delay", TRC_DELAY},
+	  	{"linear", TRC_LINEAR},
+	  	{"swr", TRC_SWR},
+	  	{"real", TRC_REAL},
+	  	{"imag", TRC_IMAG},
+	  	{"r", TRC_R},
+	  	{"x", TRC_X},
+	  	{"off", TRC_OFF},
+	  };
+	  for (uint16_t i=0; i<sizeof(t_list)/sizeof(type_list); i++){
+		if (strcmp(argv[1], t_list[i].tracename) == 0) {
+		      set_trace_type(t, t_list[i].type);
+		      goto check_ch_num;
+		}
+	}
+  	if (strcmp(argv[1], "scale") == 0 && argc >= 3) {
       //trace[t].scale = my_atof(argv[2]);
       set_trace_scale(t, my_atof(argv[2]));
       goto exit;
@@ -1743,16 +1732,17 @@ static void cmd_trace(BaseSequentialStream *chp, int argc, char *argv[])
       goto usage;
     }
   }
+  check_ch_num:
   if (argc > 2) {
     int src = atoi(argv[2]);
     if (src != 0 && src != 1)
       goto usage;
     trace[t].channel = src;
-  }  
+  }
  exit:
   return;
  usage:
-  chprintf(chp, "trace {0|1|2|3|all} [logmag|phase|smith|linear|delay|swr|real|imag|r|x|off] [src]\r\n");
+  chprintf(chp, "trace {0|1|2|3|all} [logmag|phase|polar|smith|linear|delay|swr|real|imag|r|x|off] [src]\r\n");
   chprintf(chp, "trace {0|1|2|3} {scale|refpos} {value}\r\n");
 }
 
@@ -2227,7 +2217,7 @@ int main(void)
     //palSetPadMode(GPIOB, 9, PAL_MODE_ALTERNATE(1) | PAL_STM32_OTYPE_OPENDRAIN);
     i2cStart(&I2CD1, &i2ccfg);
     while (!si5351_init()) {
-        ili9341_drawstring_size("error: si5351_init failed", 0, 0, RGBHEX(0xff0000), 0x0000, 2);
+        ili9341_drawstring_size("error: si5351_init failed", 0, 0, 2);
     }
 
     // MCO on PA8
@@ -2295,8 +2285,8 @@ int main(void)
 
 
     // redraw_frame();
-     draw_frequencies();
-     draw_cal_status();
+    //draw_frequencies();
+    //draw_cal_status();
 	 
     chThdSetPriority(HIGHPRIO);
     chThdCreateStatic(waThread1, sizeof(waThread1), NORMALPRIO, Thread1, NULL);
